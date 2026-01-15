@@ -60,6 +60,11 @@ return {
 		{ key = "p", mods = "SHIFT|CTRL", action = act.ActivateCommandPalette },
 
 		----------------------------------------------------
+		-- Show Launcher (all commands with keybindings)
+		----------------------------------------------------
+		{ key = "?", mods = "LEADER", action = act.ShowLauncherArgs({ flags = "FUZZY|COMMANDS", title = "Commands" }) },
+
+		----------------------------------------------------
 		-- Tab
 		----------------------------------------------------
 		-- Tab移動
