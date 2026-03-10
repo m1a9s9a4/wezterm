@@ -49,16 +49,14 @@ end)
 config.window_decorations = "RESIZE"
 -- タブバーの表示
 config.show_tabs_in_tab_bar = true
--- タブが一つの時は非表示
-config.hide_tab_bar_if_only_one_tab = true
--- falseにするとタブバーの透過が効かなくなる
--- config.use_fancy_tab_bar = false
-
--- タブバーの透過
-config.window_frame = {
-	inactive_titlebar_bg = "none",
-	active_titlebar_bg = "none",
-}
+-- ステータスバーとして常時表示（CPU/MEM 等を表示するため）
+config.hide_tab_bar_if_only_one_tab = false
+-- retro tab bar（色を完全にコントロール可能）
+config.use_fancy_tab_bar = false
+-- タブバーを画面下部に配置（tmux スタイル）
+config.tab_bar_at_bottom = true
+-- タブの高さ
+config.tab_max_width = 32
 
 -- タブバーを背景色に合わせる (Kanagawa background)
 config.window_background_gradient = {
@@ -110,42 +108,192 @@ wezterm.on("format-tab-title", function(tab, tabs, panes, config, hover, max_wid
 end)
 
 ----------------------------------------------------
--- Right Status (Command Duration)
+-- Status Bar (Powerline)
 ----------------------------------------------------
-wezterm.on("update-right-status", function(window, pane)
-	-- Kanagawa colors
-	local yellow = "#FF9E3B" -- roninYellow
-	local text = ""
+-- Kanagawa palette
+local K = {
+	bg = "#1F1F28", -- sumiInk1
+	fg = "#DCD7BA", -- fujiWhite
+	dark = "#16161D", -- sumiInk0
+	gray = "#54546D", -- sumiInk4
+	yellow = "#FF9E3B", -- roninYellow
+	blue = "#7E9CD8", -- crystalBlue
+	green = "#98BB6C", -- springGreen
+	red = "#C34043", -- autumnRed
+	magenta = "#957FB8", -- oniViolet
+	orange = "#FFA066", -- surimiOrange
+}
 
-	-- Get command duration
-	local duration = window:active_pane():get_foreground_process_name()
-	local cmd_duration = math.floor(pane:get_metadata().since_last_response_ms or 0)
+local SEP_L = wezterm.nerdfonts.pl_left_hard_divider
+local SEP_R = wezterm.nerdfonts.pl_right_hard_divider
 
-	if cmd_duration > 0 then
-		local seconds = cmd_duration / 1000
-		if seconds < 60 then
-			text = string.format("⏱️  %.1fs", seconds)
-		elseif seconds < 3600 then
-			text = string.format("⏱️  %.1fm", seconds / 60)
-		else
-			text = string.format("⏱️  %.1fh", seconds / 3600)
-		end
+-- Navigation hints toggle (Leader+n で切り替え)
+if wezterm.GLOBAL.show_nav_hints == nil then
+	wezterm.GLOBAL.show_nav_hints = true
+end
 
-		window:set_right_status(wezterm.format({
-			{ Foreground = { Color = yellow } },
-			{ Text = text .. " " },
-		}))
-	else
-		window:set_right_status("")
+-- System metrics cache (10秒間隔で更新)
+local sys = { mem = "", cpu = "", ts = 0 }
+
+local function refresh_sys()
+	local now = os.time()
+	if now - sys.ts < 10 then
+		return
 	end
+	sys.ts = now
+	local ok, out = wezterm.run_child_process({
+		"bash",
+		"-c",
+		"ps -caxm -orss= | awk '{s+=$1}END{printf \"%.1f\",s/1048576}'",
+	})
+	if ok then
+		sys.mem = out:gsub("%s+$", "") .. "G"
+	end
+	ok, out = wezterm.run_child_process({ "sysctl", "-n", "vm.loadavg" })
+	if ok then
+		local l = out:match("{%s+([%d%.]+)")
+		if l then
+			sys.cpu = l
+		end
+	end
+end
+
+-- Powerline builder (右側: ◀ seg1 ◀ seg2 ...)
+local function powerline_right(segs)
+	local el = {}
+	for i, s in ipairs(segs) do
+		local prev = i > 1 and segs[i - 1].bg or K.bg
+		table.insert(el, { Background = { Color = prev } })
+		table.insert(el, { Foreground = { Color = s.bg } })
+		table.insert(el, { Text = SEP_L })
+		table.insert(el, { Background = { Color = s.bg } })
+		table.insert(el, { Foreground = { Color = s.fg } })
+		table.insert(el, { Text = s.text })
+	end
+	return el
+end
+
+wezterm.on("update-right-status", function(window, pane)
+	refresh_sys()
+	local segs = {}
+
+	-- Key table (アクティブ時のみ)
+	local kt = window:active_key_table()
+	if kt then
+		table.insert(segs, { text = " " .. kt .. " ", bg = K.red, fg = K.fg })
+	end
+
+	-- CPU load
+	if sys.cpu ~= "" then
+		table.insert(segs, { text = " CPU " .. sys.cpu .. " ", bg = K.gray, fg = K.fg })
+	end
+
+	-- Memory
+	if sys.mem ~= "" then
+		table.insert(segs, { text = " MEM " .. sys.mem .. " ", bg = K.magenta, fg = K.dark })
+	end
+
+	-- Battery
+	local bat = wezterm.battery_info()
+	if #bat > 0 then
+		local pct = math.floor(bat[1].state_of_charge * 100)
+		table.insert(segs, { text = " BAT " .. pct .. "% ", bg = K.blue, fg = K.dark })
+	end
+
+	-- Date & Time
+	table.insert(segs, { text = " " .. wezterm.strftime("%m/%d %H:%M") .. " ", bg = K.yellow, fg = K.dark })
+
+	window:set_right_status(wezterm.format(powerline_right(segs)))
+
+	-- Left status: workspace name + navigation hints
+	local ws = window:active_workspace()
+	local left = {
+		{ Background = { Color = K.green } },
+		{ Foreground = { Color = K.dark } },
+		{ Text = " " .. ws .. " " },
+		{ Background = { Color = K.bg } },
+		{ Foreground = { Color = K.green } },
+		{ Text = SEP_R },
+	}
+
+	if wezterm.GLOBAL.show_nav_hints then
+		local hints = " C-hjkl:Move  A-hjkl:Resize  Cmd+D:Split  Ldr+x:Close  Ldr+z:Zoom "
+		-- gray segment
+		table.insert(left, { Background = { Color = K.bg } })
+		table.insert(left, { Foreground = { Color = K.gray } })
+		table.insert(left, { Text = SEP_R })
+		table.insert(left, { Background = { Color = K.gray } })
+		table.insert(left, { Foreground = { Color = K.fg } })
+		table.insert(left, { Text = hints })
+		table.insert(left, { Background = { Color = K.bg } })
+		table.insert(left, { Foreground = { Color = K.gray } })
+		table.insert(left, { Text = SEP_R })
+	end
+
+	window:set_left_status(wezterm.format(left))
 end)
+
+----------------------------------------------------
+-- smart-splits (Neovim ↔ WezTerm pane navigation)
+----------------------------------------------------
+local function is_vim(pane)
+	return pane:get_foreground_process_name():find("n?vim") ~= nil
+end
+
+local direction_keys = {
+	h = "Left",
+	j = "Down",
+	k = "Up",
+	l = "Right",
+}
+
+local function split_nav(resize_or_move, key)
+	return {
+		key = key,
+		mods = resize_or_move == "resize" and "ALT" or "CTRL",
+		action = wezterm.action_callback(function(win, pane)
+			if is_vim(pane) then
+				-- Neovim に渡す
+				win:perform_action({
+					SendKey = { key = key, mods = resize_or_move == "resize" and "ALT" or "CTRL" },
+				}, pane)
+			else
+				if resize_or_move == "resize" then
+					win:perform_action({ AdjustPaneSize = { direction_keys[key], 3 } }, pane)
+				else
+					win:perform_action({ ActivatePaneDirection = direction_keys[key] }, pane)
+				end
+			end
+		end),
+	}
+end
 
 ----------------------------------------------------
 -- keybinds
 ----------------------------------------------------
 config.disable_default_key_bindings = true
-config.keys = require("keybinds").keys
-config.key_tables = require("keybinds").key_tables
+
+local keybinds = require("keybinds")
+local keys = keybinds.keys
+
+-- Navigation hints トグル (Leader+n)
+table.insert(keys, {
+	key = "n",
+	mods = "LEADER",
+	action = wezterm.action_callback(function(window, pane)
+		wezterm.GLOBAL.show_nav_hints = not wezterm.GLOBAL.show_nav_hints
+		wezterm.log_info("Nav hints: " .. tostring(wezterm.GLOBAL.show_nav_hints))
+	end),
+})
+
+-- smart-splits キーを追加
+for _, k in ipairs({ "h", "j", "k", "l" }) do
+	table.insert(keys, split_nav("move", k))
+	table.insert(keys, split_nav("resize", k))
+end
+
+config.keys = keys
+config.key_tables = keybinds.key_tables
 config.leader = { key = "q", mods = "CTRL", timeout_milliseconds = 2000 }
 
 return config
