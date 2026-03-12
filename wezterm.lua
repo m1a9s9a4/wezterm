@@ -43,6 +43,14 @@ wezterm.on("window-focus-changed", function(window, pane)
 end)
 
 ----------------------------------------------------
+-- Pane (フォーカスしていないペインを暗くする)
+----------------------------------------------------
+config.inactive_pane_hsb = {
+	saturation = 0.7,
+	brightness = 0.5,
+}
+
+----------------------------------------------------
 -- Tab
 ----------------------------------------------------
 -- タイトルバーを非表示
@@ -132,6 +140,19 @@ if wezterm.GLOBAL.show_nav_hints == nil then
 	wezterm.GLOBAL.show_nav_hints = true
 end
 
+-- System specs (起動時に1回だけ取得)
+local specs = { cores = 0, mem_gb = 0 }
+do
+	local ok, out = wezterm.run_child_process({ "sysctl", "-n", "hw.ncpu" })
+	if ok then
+		specs.cores = tonumber(out:match("%d+")) or 0
+	end
+	ok, out = wezterm.run_child_process({ "sysctl", "-n", "hw.memsize" })
+	if ok then
+		specs.mem_gb = math.floor((tonumber(out:match("%d+")) or 0) / 1073741824)
+	end
+end
+
 -- System metrics cache (10秒間隔で更新)
 local sys = { mem = "", cpu = "", ts = 0 }
 
@@ -147,7 +168,7 @@ local function refresh_sys()
 		"ps -caxm -orss= | awk '{s+=$1}END{printf \"%.1f\",s/1048576}'",
 	})
 	if ok then
-		sys.mem = out:gsub("%s+$", "") .. "G"
+		sys.mem = out:gsub("%s+$", "")
 	end
 	ok, out = wezterm.run_child_process({ "sysctl", "-n", "vm.loadavg" })
 	if ok then
@@ -183,14 +204,18 @@ wezterm.on("update-right-status", function(window, pane)
 		table.insert(segs, { text = " " .. kt .. " ", bg = K.red, fg = K.fg })
 	end
 
-	-- CPU load
+	-- CPU load (値/コア数 — コア数を超えると過負荷)
 	if sys.cpu ~= "" then
-		table.insert(segs, { text = " CPU " .. sys.cpu .. " ", bg = K.gray, fg = K.fg })
+		local load = tonumber(sys.cpu) or 0
+		local bg = load > specs.cores * 0.8 and K.red or K.gray
+		table.insert(segs, { text = " CPU " .. sys.cpu .. "/" .. specs.cores .. " ", bg = bg, fg = K.fg })
 	end
 
-	-- Memory
+	-- Memory (使用量/総量)
 	if sys.mem ~= "" then
-		table.insert(segs, { text = " MEM " .. sys.mem .. " ", bg = K.magenta, fg = K.dark })
+		local used = tonumber(sys.mem) or 0
+		local bg = used > specs.mem_gb * 0.8 and K.red or K.magenta
+		table.insert(segs, { text = " MEM " .. sys.mem .. "/" .. specs.mem_gb .. "G ", bg = bg, fg = K.dark })
 	end
 
 	-- Battery
@@ -217,7 +242,7 @@ wezterm.on("update-right-status", function(window, pane)
 	}
 
 	if wezterm.GLOBAL.show_nav_hints then
-		local hints = " C-hjkl:Move  A-hjkl:Resize  Cmd+D:Split  Ldr+x:Close  Ldr+z:Zoom "
+		local hints = " C-hjkl:Pane Move  Space+e:Files  Space+ff:Find  Space+fg:Grep  Space+gg:Git  Ldr+?:Help  Ldr+n:Hide "
 		-- gray segment
 		table.insert(left, { Background = { Color = K.bg } })
 		table.insert(left, { Foreground = { Color = K.gray } })
@@ -257,12 +282,18 @@ local function split_nav(resize_or_move, key)
 				win:perform_action({
 					SendKey = { key = key, mods = resize_or_move == "resize" and "ALT" or "CTRL" },
 				}, pane)
-			else
+			elseif #pane:tab():panes() > 1 then
+				-- 複数ペイン時のみナビゲーション
 				if resize_or_move == "resize" then
 					win:perform_action({ AdjustPaneSize = { direction_keys[key], 3 } }, pane)
 				else
 					win:perform_action({ ActivatePaneDirection = direction_keys[key] }, pane)
 				end
+			else
+				-- ペイン1つ → キーをそのままシェルに渡す (Ctrl+k 等が使える)
+				win:perform_action({
+					SendKey = { key = key, mods = resize_or_move == "resize" and "ALT" or "CTRL" },
+				}, pane)
 			end
 		end),
 	}
